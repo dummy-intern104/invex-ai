@@ -83,17 +83,15 @@ export const createUserSlice = (
       const userId = currentUser.id;
       console.log("USER: Syncing data for user:", userId);
       
-      // First clear any existing data to prevent mixing user data
-      set({
-        products: [],
-        sales: [],
-        clients: [],
-        payments: [],
-        meetings: [],
-        productExpiries: []
-      });
+      // Save current local data first to prevent data loss
+      const currentState = get();
+      if (currentState.products?.length > 0 || currentState.sales?.length > 0 || 
+          currentState.clients?.length > 0 || currentState.payments?.length > 0) {
+        console.log("USER: Saving local data before sync to prevent loss");
+        await saveUserDataToSupabase(userId, currentState);
+      }
       
-      const userData = await fetchUserDataFromSupabase(userId);
+      const userData = await fetchUserDataFromSupabase(userId, { skipConflictCheck: silent });
       
       if (!userData) {
         // If no data exists in Supabase, create empty record
@@ -139,6 +137,7 @@ export const createUserSlice = (
           
           if (!silent) {
             console.log("USER: Data loaded successfully from Supabase");
+            toast.success("Data synchronized successfully");
           }
         } catch (parseError) {
           console.error('USER: Error parsing data from Supabase:', parseError);

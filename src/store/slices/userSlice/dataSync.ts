@@ -1,3 +1,4 @@
+
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 
@@ -39,23 +40,15 @@ const detectConflicts = (localData: any, remoteData: any): DataConflict[] => {
 };
 
 /**
- * Resolve conflicts with user preference for local data
+ * Resolve conflicts with user preference for remote data (server data wins)
  */
 const resolveConflicts = (conflicts: DataConflict[]): any => {
   const resolved: any = {};
   
   conflicts.forEach(conflict => {
-    // For now, prefer local data with more items (user has been working)
-    const localCount = Array.isArray(conflict.local) ? conflict.local.length : 0;
-    const remoteCount = Array.isArray(conflict.remote) ? conflict.remote.length : 0;
-    
-    if (localCount >= remoteCount) {
-      resolved[conflict.field] = conflict.local;
-      console.log(`DATASYNC: Resolved conflict for ${conflict.field} - keeping local data (${localCount} items)`);
-    } else {
-      resolved[conflict.field] = conflict.remote;
-      console.log(`DATASYNC: Resolved conflict for ${conflict.field} - using remote data (${remoteCount} items)`);
-    }
+    // For cross-device sync, prefer remote data (server data wins)
+    resolved[conflict.field] = conflict.remote;
+    console.log(`DATASYNC: Resolved conflict for ${conflict.field} - using server data`);
   });
   
   return resolved;
@@ -73,22 +66,6 @@ export async function saveUserDataToSupabase(userId: string, state: any) {
   }
   
   try {
-    // Create backup before saving
-    const backupData = {
-      products: [...(state.products || [])],
-      sales: [...(state.sales || [])],
-      clients: [...(state.clients || [])],
-      payments: [...(state.payments || [])],
-      timestamp: Date.now()
-    };
-    
-    // Save backup to sessionStorage for recovery
-    try {
-      sessionStorage.setItem('invex_data_backup', JSON.stringify(backupData));
-    } catch (e) {
-      console.warn("DATASYNC: Could not save backup to sessionStorage");
-    }
-    
     // Get current data to save
     const userData = {
       user_id: userId,
@@ -115,23 +92,14 @@ export async function saveUserDataToSupabase(userId: string, state: any) {
     
     if (error) {
       console.error('DATASYNC: Error saving data to Supabase:', error);
-      
-      // Try to restore from backup
-      const backup = sessionStorage.getItem('invex_data_backup');
-      if (backup) {
-        console.log("DATASYNC: Data save failed, backup available for recovery");
-      }
-      
-      toast.error("Failed to save your changes - data backed up locally");
+      toast.error("Failed to save your changes");
       throw error;
     } else {
       console.log("DATASYNC: Data successfully saved to Supabase");
-      // Clear backup after successful save
-      sessionStorage.removeItem('invex_data_backup');
     }
   } catch (error) {
     console.error('DATASYNC: Error saving to Supabase:', error);
-    toast.error("Error saving your changes - data backed up locally");
+    toast.error("Error saving your changes");
     throw error;
   }
 }
@@ -150,18 +118,6 @@ export async function fetchUserDataFromSupabase(userId: string, options: { skipC
   }
   
   try {
-    // Check for local backup first
-    let localBackup = null;
-    try {
-      const backup = sessionStorage.getItem('invex_data_backup');
-      if (backup) {
-        localBackup = JSON.parse(backup);
-        console.log("DATASYNC: Found local backup data");
-      }
-    } catch (e) {
-      console.warn("DATASYNC: Could not parse local backup");
-    }
-    
     // Fetch user data from the user_data table
     const { data: userData, error: userDataError } = await supabase
       .from('user_data')
@@ -193,26 +149,7 @@ export async function fetchUserDataFromSupabase(userId: string, options: { skipC
     console.log("DATASYNC: Fetched expiry data:", productExpiries.length, "records");
     
     if (!userData) {
-      console.log("DATASYNC: No existing user data found");
-      
-      // If we have local backup, offer to restore it
-      if (localBackup && !options.skipConflictCheck) {
-        const shouldRestore = confirm(
-          "No data found on server, but you have local backup data. Would you like to restore it?"
-        );
-        
-        if (shouldRestore) {
-          console.log("DATASYNC: Restoring from local backup");
-          return {
-            products: localBackup.products || [],
-            sales: localBackup.sales || [],
-            clients: localBackup.clients || [],
-            payments: localBackup.payments || [],
-            productExpiries
-          };
-        }
-      }
-      
+      console.log("DATASYNC: No existing user data found - this might be a new device or first login");
       return {
         products: [],
         sales: [],
@@ -227,44 +164,9 @@ export async function fetchUserDataFromSupabase(userId: string, options: { skipC
       salesCount: Array.isArray(userData.sales) ? userData.sales.length : 0,
       clientsCount: Array.isArray(userData.clients) ? userData.clients.length : 0,
       paymentsCount: Array.isArray(userData.payments) ? userData.payments.length : 0,
-      expiryCount: productExpiries.length
+      expiryCount: productExpiries.length,
+      lastUpdated: userData.updated_at
     });
-    
-    // Check for conflicts with local backup
-    if (localBackup && !options.skipConflictCheck) {
-      const conflicts = detectConflicts(localBackup, userData);
-      
-      if (conflicts.length > 0) {
-        console.log("DATASYNC: Detected conflicts between local and remote data");
-        
-        const shouldResolveConflicts = confirm(
-          `Found differences between your local data and server data. ` +
-          `Would you like to automatically resolve conflicts? ` +
-          `(Your local changes will be preserved where possible)`
-        );
-        
-        if (shouldResolveConflicts) {
-          const resolvedData = resolveConflicts(conflicts);
-          
-          // Merge resolved data with remote data
-          const mergedData = {
-            products: resolvedData.products || userData.products || [],
-            sales: resolvedData.sales || userData.sales || [],
-            clients: resolvedData.clients || userData.clients || [],
-            payments: resolvedData.payments || userData.payments || [],
-            productExpiries
-          };
-          
-          toast.success("Data conflicts resolved - local changes preserved");
-          return mergedData;
-        }
-      }
-    }
-    
-    // Clear backup after successful sync
-    if (localBackup) {
-      sessionStorage.removeItem('invex_data_backup');
-    }
     
     return {
       products: userData.products || [],
@@ -354,8 +256,9 @@ export function setupRealtimeSubscription(userId: string, dataUpdateCallback: (d
   // Mark this subscription as active
   activeSubscriptions.add(subscriptionKey);
   
-  const channel = supabase
-    .channel(`user_data_changes_${userId}`) // Make channel name unique per user
+  // Set up realtime subscription for user_data table
+  const userDataChannel = supabase
+    .channel(`user_data_changes_${userId}`)
     .on(
       'postgres_changes',
       {
@@ -365,63 +268,63 @@ export function setupRealtimeSubscription(userId: string, dataUpdateCallback: (d
         filter: `user_id=eq.${userId}`
       },
       (payload) => {
-        console.log("DATASYNC: Received realtime update:", {
+        console.log("DATASYNC: Received user_data realtime update:", {
           userId,
           updateTime: payload.new?.updated_at,
           hasNewData: !!payload.new
         });
         
         if (payload.new) {
-          // Enhanced time checking for realtime updates
           const updateTime = new Date(payload.new.updated_at).getTime();
           const now = Date.now();
-          const isRecentUpdate = (now - updateTime) < 300000; // Within last 5 minutes (increased)
+          const isRecentUpdate = (now - updateTime) < 60000; // Within last 1 minute
           
           if (isRecentUpdate) {
-            console.log("DATASYNC: Processing update from another device");
-            
-            // Enhanced update processing with better filtering
-            const timeSinceUpdate = now - updateTime;
-            console.log("DATASYNC: Update is", Math.round(timeSinceUpdate / 1000), "seconds old");
-            
-            // The callback will update the store with the new data
+            console.log("DATASYNC: Processing user_data update from another device");
             dataUpdateCallback(payload.new);
-          } else {
-            console.log("DATASYNC: Ignoring stale update", {
-              updateTime: new Date(updateTime).toISOString(),
-              now: new Date(now).toISOString(),
-              ageMinutes: Math.round((now - updateTime) / 60000)
-            });
           }
         }
       }
     )
     .subscribe((status) => {
-      console.log("DATASYNC: Realtime subscription status:", status, "for user:", userId);
-      if (status === "SUBSCRIBED") {
-        console.log("DATASYNC: Successfully subscribed to realtime updates for user:", userId);
-      } else if (status === "CHANNEL_ERROR") {
-        console.error("DATASYNC: Error subscribing to realtime updates");
-        // Mark subscription as failed
-        activeSubscriptions.delete(subscriptionKey);
-        // Enhanced retry logic with exponential backoff
-        const retryDelay = Math.min(30000, 5000 * Math.pow(2, activeSubscriptions.size)); // Max 30 seconds
-        setTimeout(() => {
-          console.log("DATASYNC: Attempting to resubscribe to realtime updates after", retryDelay / 1000, "seconds");
-          if (!activeSubscriptions.has(subscriptionKey)) {
-            setupRealtimeSubscription(userId, dataUpdateCallback);
-          }
-        }, retryDelay);
-      } else if (status === "CLOSED") {
-        console.log("DATASYNC: Subscription closed for user:", userId);
-        activeSubscriptions.delete(subscriptionKey);
+      console.log("DATASYNC: User data subscription status:", status, "for user:", userId);
+    });
+
+  // Set up realtime subscription for product_expiry table
+  const expiryChannel = supabase
+    .channel(`expiry_changes_${userId}`)
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'product_expiry',
+        filter: `user_id=eq.${userId}`
+      },
+      (payload) => {
+        console.log("DATASYNC: Received expiry realtime update:", {
+          event: payload.eventType,
+          userId,
+          hasNewData: !!payload.new
+        });
+        
+        // Trigger a refresh of expiry data
+        if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE' || payload.eventType === 'DELETE') {
+          console.log("DATASYNC: Expiry data changed, triggering refresh");
+          // The callback will handle refreshing expiry data
+          dataUpdateCallback({ refreshExpiry: true });
+        }
       }
+    )
+    .subscribe((status) => {
+      console.log("DATASYNC: Expiry subscription status:", status, "for user:", userId);
     });
   
   // Return enhanced cleanup function
   return () => {
-    console.log("DATASYNC: Removing realtime subscription for user:", userId);
+    console.log("DATASYNC: Removing realtime subscriptions for user:", userId);
     activeSubscriptions.delete(subscriptionKey);
-    supabase.removeChannel(channel);
+    supabase.removeChannel(userDataChannel);
+    supabase.removeChannel(expiryChannel);
   };
 }

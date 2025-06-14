@@ -76,9 +76,12 @@ export function AuthProvider({ children }: AuthProviderProps) {
             console.log('AUTH: User authenticated, updating store currentUser');
             setCurrentUser(initialSession.user);
             clearUserData();
+            
+            // Force immediate sync with server data
             setTimeout(async () => {
               try {
-                await syncDataWithSupabase();
+                console.log('AUTH: Starting data sync for authenticated user');
+                await syncDataWithSupabase({ silent: false });
                 await loadProductExpiries();
                 setupRealtimeUpdates(initialSession.user.id);
               } catch (error) {
@@ -120,9 +123,11 @@ export function AuthProvider({ children }: AuthProviderProps) {
           clearUserData();
           setCurrentUser(user); // Set again after clearing
           
+          // Force immediate sync for new user
           setTimeout(async () => {
             try {
-              await syncDataWithSupabase();
+              console.log('AUTH: Starting data sync for new user');
+              await syncDataWithSupabase({ silent: false });
               await loadProductExpiries();
               setupRealtimeUpdates(user.id);
             } catch (error) {
